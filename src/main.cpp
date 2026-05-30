@@ -12,6 +12,7 @@
 #include "DevDS18B20.h"
 #include "DevMQTT.h"
 #include "DevWebServer.h"
+#include "DevStateStore.h"
 
 // --- Switch: Active Low, External Pull-up 10kΩ ---
 DevSwitch sw1(34, false);
@@ -44,6 +45,9 @@ DevMQTT mqtt(&relay1, &relay2, &relay3, &weather, &ds18, &xymd);
 // --- Web Server ---
 DevWebServer webServer(&relay1, &relay2, &relay3, &weather, &ds18, &xymd);
 
+// --- State Store (NVS) ---
+DevStateStore stateStore;
+
 // ── อัปเดต OLED ──────────────────────────────────────────────
 static void _updateDisplay() {
   const WeatherData& w = weather.getData();
@@ -63,11 +67,17 @@ static void _updateDisplay() {
   );
 }
 
+// ── บันทึก relay state ทั้งหมดลง NVS ───────────────────────
+static void _saveRelayState() {
+  stateStore.saveAllRelays(relay1.getState(), relay2.getState(), relay3.getState());
+}
+
 // ── relay toggle จาก physical switch ─────────────────────────
 static void _toggleRelay(int n) {
   DevRelay* r[] = {&relay1, &relay2, &relay3};
   r[n-1]->toggle();
   Serial.printf("Relay%d = %s\n", n, r[n-1]->getState() ? "ON" : "OFF");
+  _saveRelayState();
   mqtt.publishRelayState(n);
   _updateDisplay();
 }
@@ -100,11 +110,26 @@ void setup() {
   oled.begin(21, 22);
   oled.showMessage("Booting...", "", "");
 
+  // โหลด state จาก NVS ก่อน begin relay
+  stateStore.load();
+
   sw2.begin();
   sw3.begin();
   relay1.begin();
   relay2.begin();
   relay3.begin();
+
+  // กู้คืนสถานะ relay ล่าสุด
+  relay1.setState(stateStore.relayState(1));
+  relay2.setState(stateStore.relayState(2));
+  relay3.setState(stateStore.relayState(3));
+
+  char bootMsg[24];
+  snprintf(bootMsg, sizeof(bootMsg), "Boot #%lu", stateStore.bootCount());
+  oled.showMessage("Restored State", bootMsg,
+    relay1.getState() || relay2.getState() || relay3.getState()
+      ? "Some relays ON" : "All relays OFF");
+  delay(1500);
 
   oled.showMessage("DS18B20", "Initializing...", "GPIO14");
   ds18.begin();
@@ -143,10 +168,10 @@ void setup() {
   oled.showMessage("Weather", "Fetching...", OWM_CITY_NAME);
   weather.update();
 
-  // MQTT — callback อัปเดต OLED + publish relay เมื่อถูกสั่งผ่าน MQTT
+  // MQTT — callback อัปเดต OLED + save state เมื่อถูกสั่งผ่าน MQTT
   auto mqttRelayChangedCb = []() {
+    _saveRelayState();
     _updateDisplay();
-    // publish state ของทุก relay (MQTT callback handle ไว้แล้ว relay เดียว)
   };
   mqtt.setOnRelayChange(mqttRelayChangedCb);
   oled.showMessage("MQTT", "Connecting...", MQTT_HOST);
@@ -154,8 +179,8 @@ void setup() {
 
   // Web Server
   webServer.setOnRelayChange([]() {
+    _saveRelayState();
     _updateDisplay();
-    // sync relay state กลับ MQTT เมื่อ toggle จาก Web
     mqtt.publishRelayState(1);
     mqtt.publishRelayState(2);
     mqtt.publishRelayState(3);
