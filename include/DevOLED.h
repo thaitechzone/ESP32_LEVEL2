@@ -179,9 +179,11 @@ public:
   }
 
   // ── เรียกใน loop() — สลับหน้าอัตโนมัติ ──────────────────────
-  void tick() {
+  // interval_ms: 0 = ใช้ PAGE_INTERVAL default
+  void tick(unsigned long interval_ms = 0) {
     if (!ready) return;
-    if (millis() - _pageAt >= PAGE_INTERVAL) {
+    unsigned long iv = (interval_ms > 0) ? interval_ms : PAGE_INTERVAL;
+    if (millis() - _pageAt >= iv) {
       _page   = (_page + 1) % 2;
       _pageAt = millis();
       _redraw();
@@ -273,6 +275,177 @@ public:
              temp, hum, rainPct,
              pm25, aqi, aqiStr,
              r1, r2, r3, ip);
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // State Machine UI screens
+  // ══════════════════════════════════════════════════════════════
+
+  // ── helper: วาด list menu ─────────────────────────────────────
+  // items[]  = array ของ label strings
+  // count    = จำนวน item
+  // cursor   = index ที่ highlight
+  // title    = header (1 บรรทัด)
+  void _drawList(const char* title, const char** items, uint8_t count,
+                 uint8_t cursor) {
+    display.clearDisplay();
+    display.setTextColor(SSD1306_WHITE);
+
+    // header
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.print(title);
+    display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
+
+    // items — แสดงได้ 5 บรรทัด (y=12,22,32,42,52)
+    // scroll window ตาม cursor
+    uint8_t start = 0;
+    const uint8_t VISIBLE = 5;
+    if (cursor >= VISIBLE) start = cursor - VISIBLE + 1;
+
+    for (uint8_t i = 0; i < VISIBLE && (start + i) < count; i++) {
+      uint8_t idx = start + i;
+      int y = 12 + i * 10;
+      if (idx == cursor) {
+        // highlight row
+        display.fillRect(0, y - 1, 128, 10, SSD1306_WHITE);
+        display.setTextColor(SSD1306_BLACK);
+      } else {
+        display.setTextColor(SSD1306_WHITE);
+      }
+      display.setCursor(4, y);
+      display.print(items[idx]);
+    }
+    display.setTextColor(SSD1306_WHITE);
+    display.display();
+  }
+
+  // ── MENU screen ───────────────────────────────────────────────
+  //  ┌──────────────────────────┐
+  //  │ MENU                     │
+  //  ├──────────────────────────┤
+  //  │▶Relay Control            │  ← highlighted
+  //  │  Settings                │
+  //  │  < Back                  │
+  //  └──────────────────────────┘
+  void showMenu(uint8_t cursor) {
+    if (!ready) return;
+    const char* items[] = {"Relay Control", "Settings", "< Back"};
+    _drawList("  *** MENU ***", items, 3, cursor);
+  }
+
+  // ── RELAY CTRL screen ────────────────────────────────────────
+  //  ┌──────────────────────────┐
+  //  │ RELAY CTRL  [SW1:select] │
+  //  ├──────────────────────────┤
+  //  │▶Relay 1        [ON ]     │
+  //  │  Relay 2       [OFF]     │
+  //  │  Relay 3       [ON ]     │
+  //  ├──────────────────────────┤
+  //  │ UP=ON  DOWN=OFF          │
+  //  └──────────────────────────┘
+  void showRelayCtrl(uint8_t cursor, bool r1, bool r2, bool r3) {
+    if (!ready) return;
+    display.clearDisplay();
+    display.setTextColor(SSD1306_WHITE);
+
+    // header
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.print("RELAY CTRL [SW1:next]");
+    display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
+
+    const char* labels[] = {"Relay 1", "Relay 2", "Relay 3"};
+    bool states[] = {r1, r2, r3};
+
+    for (uint8_t i = 0; i < 3; i++) {
+      int y = 12 + i * 12;
+      bool selected = (i == cursor);
+
+      if (selected) {
+        display.fillRect(0, y - 1, 128, 11, SSD1306_WHITE);
+        display.setTextColor(SSD1306_BLACK);
+      } else {
+        display.setTextColor(SSD1306_WHITE);
+      }
+
+      display.setCursor(4, y);
+      display.print(labels[i]);
+
+      // state badge ชิดขวา
+      const char* badge = states[i] ? "[ON ]" : "[OFF]";
+      display.setCursor(84, y);
+      if (selected) {
+        // badge invert back
+        display.setTextColor(states[i] ? SSD1306_BLACK : SSD1306_BLACK);
+        display.fillRect(83, y - 1, 44, 11,
+                         states[i] ? SSD1306_BLACK : SSD1306_BLACK);
+        display.setTextColor(SSD1306_BLACK);
+      }
+      display.print(badge);
+    }
+
+    display.setTextColor(SSD1306_WHITE);
+    display.drawLine(0, 48, 127, 48, SSD1306_WHITE);
+    display.setCursor(0, 51);
+    display.print("UP=ON  DOWN=OFF  Hold=Back");
+    display.display();
+  }
+
+  // ── SETTINGS screen ──────────────────────────────────────────
+  void showSettings(uint8_t cursor, bool oledFast) {
+    if (!ready) return;
+    char speedLabel[24];
+    snprintf(speedLabel, sizeof(speedLabel), "OLED Speed: %s",
+             oledFast ? "[FAST 2s]" : "[SLOW 5s]");
+    const char* items[] = {"WiFi Reset", speedLabel, "< Back"};
+    _drawList("  *** SETTINGS ***", items, 3, cursor);
+  }
+
+  // ── CONFIRM screen ───────────────────────────────────────────
+  //  ┌──────────────────────────┐
+  //  │ CONFIRM                  │
+  //  │                          │
+  //  │  WiFi Reset?             │
+  //  │                          │
+  //  │  ▶ YES        NO         │
+  //  │                          │
+  //  │ UP=YES  DOWN=NO  SW1=OK  │
+  //  └──────────────────────────┘
+  void showConfirm(const char* actionLabel, uint8_t cursor) {
+    if (!ready) return;
+    display.clearDisplay();
+    display.setTextColor(SSD1306_WHITE);
+
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.print("  *** CONFIRM ***");
+    display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
+
+    display.setCursor(4, 16);
+    display.print(actionLabel);
+    display.setCursor(4, 26);
+    display.print("Are you sure?");
+
+    // YES button
+    bool yesSelected = (cursor == 0);
+    if (yesSelected) display.fillRect(8, 38, 44, 12, SSD1306_WHITE);
+    display.setTextColor(yesSelected ? SSD1306_BLACK : SSD1306_WHITE);
+    display.setCursor(16, 40);
+    display.print("YES");
+
+    // NO button
+    bool noSelected = (cursor == 1);
+    if (noSelected) display.fillRect(68, 38, 44, 12, SSD1306_WHITE);
+    display.setTextColor(noSelected ? SSD1306_BLACK : SSD1306_WHITE);
+    display.setCursor(76, 40);
+    display.print("NO");
+
+    display.setTextColor(SSD1306_WHITE);
+    display.drawLine(0, 54, 127, 54, SSD1306_WHITE);
+    display.setCursor(0, 56);
+    display.print("UP=YES DOWN=NO SW1=OK");
+    display.display();
   }
 
   bool isReady() const { return ready; }

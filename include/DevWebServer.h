@@ -154,7 +154,7 @@ public:
 
     // GET / → dashboard HTML
     server.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
-      req->send_P(200, "text/html", DASHBOARD_HTML);
+      req->send(200, "text/html", DASHBOARD_HTML);
     });
 
     // GET /api/status → JSON snapshot (สำหรับ REST polling สำรอง)

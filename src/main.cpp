@@ -13,116 +13,126 @@
 #include "DevMQTT.h"
 #include "DevWebServer.h"
 #include "DevStateStore.h"
+#include "DevStateMachine.h"
 
-// --- Switch: Active Low, External Pull-up 10kΩ ---
-DevSwitch sw1(34, false);
-DevSwitch sw2(35, false);
-DevSwitch sw3(32, false);
+// ── Hardware ──────────────────────────────────────────────────
+// SW1=MODE/ENTER  SW2=DOWN  SW3=UP
+DevSwitch sw1(34, false);   // MODE / ENTER
+DevSwitch sw2(35, false);   // DOWN
+DevSwitch sw3(32, false);   // UP
 
-// --- Relay: Active Low ---
 DevRelay relay1(17, true);
 DevRelay relay2(16, true);
 DevRelay relay3(4,  true);
 
-// --- OLED: I2C SDA=21, SCL=22 ---
 DevOLED oled;
-
-// --- WiFi Manager ---
 DevWifiManager wifiMgr(&oled, "ESP32-Setup");
-
-// --- Weather ---
 DevWeather weather;
-
-// --- DS18B20: GPIO14 ---
 DevDS18B20 ds18(14);
-
-// --- XY-MD03: Serial0, Slave ID=2 ---
 DevXYMDSensor xymd(&Serial, 2, 5000);
-
-// --- MQTT ---
 DevMQTT mqtt(&relay1, &relay2, &relay3, &weather, &ds18, &xymd);
-
-// --- Web Server ---
 DevWebServer webServer(&relay1, &relay2, &relay3, &weather, &ds18, &xymd);
-
-// --- State Store (NVS) ---
 DevStateStore stateStore;
+DevStateMachine sm(sw1, sw2, sw3, &relay1, &relay2, &relay3);
 
-// ── อัปเดต OLED ──────────────────────────────────────────────
-static void _updateDisplay() {
-  const WeatherData& w = weather.getData();
-  String ip = WiFi.localIP().toString();
+// ── forward declarations ───────────────────────────────────────
+static void _drawCurrentState();
+static void _onRelayChanged(int n);
 
-  oled.showMain(
-    ds18.getTemp(),        ds18.isSimMode(),
-    xymd.getTemperature(), xymd.getHumidity(), xymd.isSimMode(),
-    w.valid ? w.temp       : 0,
-    w.valid ? w.humidity   : 0,
-    w.valid ? w.rainChance : 0,
-    w.valid ? w.pm25       : 0,
-    w.valid ? w.aqi        : 0,
-    w.valid ? aqiLabel(w.aqi) : "--",
-    relay1.getState(), relay2.getState(), relay3.getState(),
-    ip.c_str()
-  );
+// ── OLED: วาดหน้าจอตาม State ปัจจุบัน ────────────────────────
+static void _drawCurrentState() {
+  using S = AppState;
+  switch (sm.getState()) {
+
+    case S::MONITOR:
+      // หน้าจอหลัก — แสดง sensor + weather (auto-cycle ผ่าน oled.tick())
+      {
+        const WeatherData& w = weather.getData();
+        String ip = WiFi.localIP().toString();
+        oled.showMain(
+          ds18.getTemp(),        ds18.isSimMode(),
+          xymd.getTemperature(), xymd.getHumidity(), xymd.isSimMode(),
+          w.valid ? w.temp       : 0,
+          w.valid ? w.humidity   : 0,
+          w.valid ? w.rainChance : 0,
+          w.valid ? w.pm25       : 0,
+          w.valid ? w.aqi        : 0,
+          w.valid ? aqiLabel(w.aqi) : "--",
+          relay1.getState(), relay2.getState(), relay3.getState(),
+          ip.c_str()
+        );
+      }
+      break;
+
+    case S::MENU:
+      oled.showMenu(sm.getCursor());
+      break;
+
+    case S::RELAY_CTRL:
+      oled.showRelayCtrl(sm.getCursor(),
+                         relay1.getState(),
+                         relay2.getState(),
+                         relay3.getState());
+      break;
+
+    case S::SETTINGS:
+      oled.showSettings(sm.getCursor(), sm.isOledFast());
+      break;
+
+    case S::CONFIRM:
+      oled.showConfirm("WiFi Reset!", sm.getCursor());
+      break;
+  }
 }
 
-// ── บันทึก relay state ทั้งหมดลง NVS ───────────────────────
-static void _saveRelayState() {
+// ── Relay เปลี่ยนสถานะ (ทุก source) ──────────────────────────
+static void _onRelayChanged(int n) {
   stateStore.saveAllRelays(relay1.getState(), relay2.getState(), relay3.getState());
+  if (n > 0) mqtt.publishRelayState(n);
+  else {
+    mqtt.publishRelayState(1);
+    mqtt.publishRelayState(2);
+    mqtt.publishRelayState(3);
+  }
+  _drawCurrentState();
 }
 
-// ── relay toggle จาก physical switch ─────────────────────────
-static void _toggleRelay(int n) {
-  DevRelay* r[] = {&relay1, &relay2, &relay3};
-  r[n-1]->toggle();
-  Serial.printf("Relay%d = %s\n", n, r[n-1]->getState() ? "ON" : "OFF");
-  _saveRelayState();
-  mqtt.publishRelayState(n);
-  _updateDisplay();
-}
-
-// ── WiFi reset hold ───────────────────────────────────────────
-static bool checkWifiResetHold(DevSwitch& sw, DevOLED& disp, int holdSec = 5) {
-  sw.begin();
-  if (!sw.readRawState()) return false;
-
+// ── WiFi reset hold ใน setup (ก่อน state machine ทำงาน) ──────
+static bool checkWifiResetHold(int holdSec = 5) {
+  sw1.begin();
+  if (!sw1.readRawState()) return false;
   for (int remain = holdSec; remain > 0; remain--) {
-    disp.showCountdown(remain, holdSec);
+    oled.showCountdown(remain, holdSec);
     unsigned long tick = millis();
     while (millis() - tick < 1000) {
-      if (!sw.readRawState()) {
-        disp.showMessage("WiFi Reset", "Cancelled", "");
+      if (!sw1.readRawState()) {
+        oled.showMessage("WiFi Reset", "Cancelled", "");
         delay(1000);
         return false;
       }
       delay(50);
     }
   }
-  disp.showMessage("WiFi Reset", "Resetting...", "");
+  oled.showMessage("WiFi Reset", "Resetting...", "");
   delay(800);
   return true;
 }
 
+// ── Setup ─────────────────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
 
   oled.begin(21, 22);
   oled.showMessage("Booting...", "", "");
 
-  // โหลด state จาก NVS ก่อน begin relay
+  // โหลด + กู้คืน state
   stateStore.load();
 
   sw2.begin();
   sw3.begin();
-  relay1.begin();
-  relay2.begin();
-  relay3.begin();
-
-  // กู้คืนสถานะ relay ล่าสุด
-  relay1.setState(stateStore.relayState(1));
-  relay2.setState(stateStore.relayState(2));
-  relay3.setState(stateStore.relayState(3));
+  relay1.begin();  relay1.setState(stateStore.relayState(1));
+  relay2.begin();  relay2.setState(stateStore.relayState(2));
+  relay3.begin();  relay3.setState(stateStore.relayState(3));
 
   char bootMsg[24];
   snprintf(bootMsg, sizeof(bootMsg), "Boot #%lu", stateStore.bootCount());
@@ -131,87 +141,113 @@ void setup() {
       ? "Some relays ON" : "All relays OFF");
   delay(1500);
 
+  // DS18B20
   oled.showMessage("DS18B20", "Initializing...", "GPIO14");
   ds18.begin();
 
-  bool doReset = checkWifiResetHold(sw1, oled, 5);
+  // WiFi reset check
+  bool doReset = checkWifiResetHold(5);
   wifiMgr.begin(doReset);
 
   String ip = wifiMgr.localIP().toString();
   oled.showIP(ip.c_str());
   delay(2000);
 
-  // XY-MD03: reinit Serial0 → 9600 Modbus
-  // Serial.print จะใช้งานไม่ได้หลังบรรทัดนี้ (Serial0 เปลี่ยน baud)
-  Serial.println("[XYMD] Initializing... Serial0 will switch to 9600");
-  Serial.flush();  // flush debug output ก่อน reinit
+  // XY-MD03 (reinit Serial0 → 9600)
+  Serial.println("[XYMD] Switching Serial0 to 9600...");
+  Serial.flush();
   oled.showMessage("XY-MD03", "SlaveID:2", "Serial0 9600");
   bool xymdOk = xymd.begin(9600);
   if (!xymdOk) {
-    // ไม่พบที่ ID=2 — สแกนหา ID อื่น (1-10)
     oled.showMessage("XY-MD03", "Scanning ID...", "");
     uint8_t foundID = xymd.scanSlaveID(10);
     if (foundID > 0) {
-      // พบที่ ID อื่น — ลอง begin ใหม่
       char buf[24];
       snprintf(buf, sizeof(buf), "Found ID:%d", foundID);
       oled.showMessage("XY-MD03", buf, "Set ID=2 on sensor");
-      xymdOk = xymd.reconnect();
+      xymd.reconnect();
     } else {
       oled.showMessage("XY-MD03", "Not found", "Sim mode");
     }
   } else {
     oled.showMessage("XY-MD03", "Found! ID:2", "");
   }
+  delay(1000);
 
-  delay(1000);  // ให้เวลา OLED แสดงผล XYMD status
+  // Weather
   oled.showMessage("Weather", "Fetching...", OWM_CITY_NAME);
   weather.update();
 
-  // MQTT — callback อัปเดต OLED + save state เมื่อถูกสั่งผ่าน MQTT
-  auto mqttRelayChangedCb = []() {
-    _saveRelayState();
-    _updateDisplay();
-  };
-  mqtt.setOnRelayChange(mqttRelayChangedCb);
+  // MQTT — relay เปลี่ยนจาก broker
+  mqtt.setOnRelayChange([]() { _onRelayChanged(0); });
   oled.showMessage("MQTT", "Connecting...", MQTT_HOST);
   mqtt.begin();
 
-  // Web Server
-  webServer.setOnRelayChange([]() {
-    _saveRelayState();
-    _updateDisplay();
-    mqtt.publishRelayState(1);
-    mqtt.publishRelayState(2);
-    mqtt.publishRelayState(3);
-  });
+  // Web Server — relay เปลี่ยนจาก dashboard
+  webServer.setOnRelayChange([]() { _onRelayChanged(0); });
   webServer.begin();
 
-  _updateDisplay();
-  Serial.println("Ready");
+  // แสดงหน้าจอ MONITOR
+  _drawCurrentState();
+  Serial.println("Ready — SW1=Menu  SW2=Down  SW3=Up  Hold SW1=Back");
 }
 
+// ── Loop ──────────────────────────────────────────────────────
 void loop() {
   sw1.update();
   sw2.update();
   sw3.update();
 
-  if (sw1.wasPressed()) _toggleRelay(1);
-  if (sw2.wasPressed()) _toggleRelay(2);
-  if (sw3.wasPressed()) _toggleRelay(3);
+  // ── State Machine ──────────────────────────────────────────
+  DevStateMachine::Result r = sm.update();
 
-  if (ds18.update()) _updateDisplay();
-  if (xymd.update()) _updateDisplay();
+  switch (r.event) {
+    case DevStateMachine::Event::RELAY_CHANGED:
+      _onRelayChanged(r.relayNum);
+      break;
 
-  if (weather.isDue()) {
-    weather.update();
-    _updateDisplay();
+    case DevStateMachine::Event::WIFI_RESET:
+      oled.showMessage("WiFi Reset", "Clearing...", "Restarting...");
+      delay(1000);
+      WiFi.disconnect(true, true);   // ล้าง credentials
+      delay(500);
+      ESP.restart();
+      break;
+
+    case DevStateMachine::Event::OLED_SPEED_TOGGLE:
+      // เปลี่ยน PAGE_INTERVAL ตาม isOledFast()
+      // ใช้ค่าจาก sm โดยตรงใน tick() ผ่าน getter
+      _drawCurrentState();  // redraw settings เพื่อแสดงค่าใหม่
+      break;
+
+    case DevStateMachine::Event::REDRAW:
+      _drawCurrentState();
+      break;
+
+    case DevStateMachine::Event::NONE:
+    default:
+      break;
   }
 
-  // sync MQTT connected state → Web dashboard
-  webServer.setMqttConnected(mqtt.isConnected());
+  // ── Sensors update ─────────────────────────────────────────
+  if (ds18.update() && sm.getState() == AppState::MONITOR) {
+    _drawCurrentState();
+  }
+  if (xymd.update() && sm.getState() == AppState::MONITOR) {
+    _drawCurrentState();
+  }
+  if (weather.isDue()) {
+    weather.update();
+    if (sm.getState() == AppState::MONITOR) _drawCurrentState();
+  }
 
+  // ── OLED auto-cycle (เฉพาะ MONITOR state) ─────────────────
+  if (sm.getState() == AppState::MONITOR) {
+    oled.tick(sm.isOledFast() ? 2000UL : 5000UL);
+  }
+
+  // ── Network ────────────────────────────────────────────────
+  webServer.setMqttConnected(mqtt.isConnected());
   mqtt.loop();
-  oled.tick();
   webServer.loop();
 }
