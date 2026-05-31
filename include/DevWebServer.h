@@ -11,32 +11,54 @@
 #include "DevWeather.h"
 #include "DevDS18B20.h"
 #include "DevXYMDSensor.h"
+#include "DevNTP.h"
+#include "DevRelayScheduler.h"
 
 class DevWebServer {
 private:
   AsyncWebServer  server;
   AsyncWebSocket  ws;
 
-  // ชี้ไปยัง objects ใน main.cpp
-  DevRelay*       relay[3];
-  DevWeather*     weather;
-  DevDS18B20*     ds18;
-  DevXYMDSensor*  xymd;
+  DevRelay*           relay[3];
+  DevWeather*         weather;
+  DevDS18B20*         ds18;
+  DevXYMDSensor*      xymd;
+  DevNTP*             ntp       = nullptr;
+  DevRelayScheduler*  scheduler = nullptr;
 
   unsigned long lastBroadcast = 0;
-  static const unsigned long BROADCAST_INTERVAL = 2000; // ms
+  static const unsigned long BROADCAST_INTERVAL = 2000;
   bool mqttConnected = false;
 
-  void (*onRelayChange)() = nullptr; // callback → เรียก _updateDisplay() ใน main.cpp
+  void (*onRelayChange)() = nullptr;
 
-  // ─── สร้าง JSON payload ───────────────────────────────────────
+  // ─── JSON payload ─────────────────────────────────────────────
   String buildJson() {
     JsonDocument doc;
 
-    // relay array [r1, r2, r3]
     JsonArray relayArr = doc["relay"].to<JsonArray>();
-    for (int i = 0; i < 3; i++) {
-      relayArr.add(relay[i]->getState());
+    for (int i = 0; i < 3; i++) relayArr.add(relay[i]->getState());
+
+    // NTP / time
+    if (ntp) {
+      doc["ntp"]["synced"] = ntp->isSynced();
+      doc["ntp"]["time"]   = ntp->timeStr();
+      doc["ntp"]["date"]   = ntp->dateStr();
+    }
+
+    // Schedules
+    if (scheduler) {
+      JsonArray sa = doc["schedules"].to<JsonArray>();
+      for (int i = 0; i < DevRelayScheduler::NUM_RELAYS; i++) {
+        const RelayScheduleEntry& e = scheduler->getEntry(i);
+        JsonObject o = sa.add<JsonObject>();
+        o["enabled"]   = e.enabled;
+        o["onHour"]    = e.onHour;
+        o["onMinute"]  = e.onMinute;
+        o["offHour"]   = e.offHour;
+        o["offMinute"] = e.offMinute;
+        o["dayMask"]   = e.dayMask;
+      }
     }
 
     // weather
@@ -65,7 +87,7 @@ private:
     doc["xymd"]["sim"]  = xymd->isSimMode();
     doc["xymd"]["id"]   = xymd->getSlaveID();
 
-    // MQTT topics info (static — ไม่ต้องรู้ connected state ตรงนี้)
+    // MQTT
     doc["mqtt"]["host"]         = MQTT_HOST;
     doc["mqtt"]["port"]         = MQTT_PORT;
     doc["mqtt"]["base"]         = MQTT_BASE;
@@ -88,30 +110,26 @@ private:
     return out;
   }
 
-  // ─── WebSocket event handler ──────────────────────────────────
-  void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
+  // ─── WebSocket event ─────────────────────────────────────────
+  void onWsEvent(AsyncWebSocket* s, AsyncWebSocketClient* client,
                  AwsEventType type, void* arg, uint8_t* data, size_t len) {
     if (type == WS_EVT_CONNECT) {
       Serial.printf("[WS] Client #%u connected from %s\n",
                     client->id(), client->remoteIP().toString().c_str());
-      // ส่ง snapshot ทันทีที่ client เชื่อมต่อ
       client->text(buildJson());
-
     } else if (type == WS_EVT_DISCONNECT) {
       Serial.printf("[WS] Client #%u disconnected\n", client->id());
-
     } else if (type == WS_EVT_DATA) {
       AwsFrameInfo* info = (AwsFrameInfo*)arg;
       if (info->final && info->index == 0 && info->len == len
           && info->opcode == WS_TEXT) {
-        // รับคำสั่งจาก browser
         String msg = String((char*)data, len);
         handleWsMessage(client, msg);
       }
     }
   }
 
-  // ─── ประมวลผลคำสั่งจาก browser ───────────────────────────────
+  // ─── WebSocket commands ───────────────────────────────────────
   void handleWsMessage(AsyncWebSocketClient* client, const String& msg) {
     JsonDocument doc;
     if (deserializeJson(doc, msg) != DeserializationError::Ok) return;
@@ -124,9 +142,38 @@ private:
         relay[n - 1]->toggle();
         Serial.printf("[WS] Relay%d toggled → %s\n",
                       n, relay[n-1]->getState() ? "ON" : "OFF");
-        // อัปเดต OLED
         if (onRelayChange) onRelayChange();
-        // broadcast ทันทีให้ทุก client เห็นพร้อมกัน
+        ws.textAll(buildJson());
+      }
+
+    } else if (cmd == "set_schedule" && scheduler) {
+      // {"cmd":"set_schedule","n":1,"enabled":true,
+      //  "onHour":6,"onMinute":0,"offHour":22,"offMinute":0,"dayMask":127}
+      int n = doc["n"].as<int>() - 1; // 0-based
+      if (n >= 0 && n < DevRelayScheduler::NUM_RELAYS) {
+        RelayScheduleEntry e;
+        e.enabled   = doc["enabled"]   | false;
+        e.onHour    = doc["onHour"]    | 6;
+        e.onMinute  = doc["onMinute"]  | 0;
+        e.offHour   = doc["offHour"]   | 22;
+        e.offMinute = doc["offMinute"] | 0;
+        e.dayMask   = doc["dayMask"]   | 0x7F;
+        // clamp
+        e.onHour    = constrain(e.onHour,   0, 23);
+        e.onMinute  = constrain(e.onMinute, 0, 59);
+        e.offHour   = constrain(e.offHour,  0, 23);
+        e.offMinute = constrain(e.offMinute,0, 59);
+        scheduler->setEntry(n, e);
+        ws.textAll(buildJson());
+      }
+
+    } else if (cmd == "relay_set" ) {
+      // {"cmd":"relay_set","n":1,"state":true}
+      int  n  = doc["n"].as<int>();
+      bool st = doc["state"].as<bool>();
+      if (n >= 1 && n <= 3) {
+        relay[n-1]->setState(st);
+        if (onRelayChange) onRelayChange();
         ws.textAll(buildJson());
       }
     }
@@ -136,33 +183,29 @@ public:
   DevWebServer(DevRelay* r1, DevRelay* r2, DevRelay* r3,
                DevWeather* wth, DevDS18B20* d18, DevXYMDSensor* xym)
     : server(80), ws("/ws"), weather(wth), ds18(d18), xymd(xym) {
-    relay[0] = r1;
-    relay[1] = r2;
-    relay[2] = r3;
+    relay[0] = r1; relay[1] = r2; relay[2] = r3;
   }
 
-  void setOnRelayChange(void (*cb)()) { onRelayChange = cb; }
-  void setMqttConnected(bool v)       { mqttConnected = v; }
+  void setOnRelayChange(void (*cb)())        { onRelayChange = cb; }
+  void setMqttConnected(bool v)              { mqttConnected = v; }
+  void setNTP(DevNTP* n)                     { ntp = n; }
+  void setScheduler(DevRelayScheduler* s)    { scheduler = s; }
 
   void begin() {
-    // WebSocket handler
     ws.onEvent([this](AsyncWebSocket* s, AsyncWebSocketClient* c,
                       AwsEventType t, void* a, uint8_t* d, size_t l) {
       onWsEvent(s, c, t, a, d, l);
     });
     server.addHandler(&ws);
 
-    // GET / → dashboard HTML
     server.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
       req->send(200, "text/html", DASHBOARD_HTML);
     });
 
-    // GET /api/status → JSON snapshot (สำหรับ REST polling สำรอง)
     server.on("/api/status", HTTP_GET, [this](AsyncWebServerRequest* req) {
       req->send(200, "application/json", buildJson());
     });
 
-    // 404
     server.onNotFound([](AsyncWebServerRequest* req) {
       req->send(404, "text/plain", "Not found");
     });
@@ -172,10 +215,8 @@ public:
                   WiFi.localIP().toString().c_str());
   }
 
-  // เรียกใน loop() — broadcast ทุก BROADCAST_INTERVAL ms
   void loop() {
-    ws.cleanupClients(); // คืน memory ของ client ที่ disconnect
-
+    ws.cleanupClients();
     unsigned long now = millis();
     if (now - lastBroadcast >= BROADCAST_INTERVAL && ws.count() > 0) {
       lastBroadcast = now;

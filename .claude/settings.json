@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\thait\\\\OneDrive\\\\Documents\\\\PlatformIO\\\\Projects\\\\ESP32_LEVEL2\" -Recurse)",
+      "Bash(Select-Object FullName)",
+      "Bash(pio run *)",
+      "PowerShell(cd \"c:\\\\Users\\\\thait\\\\OneDrive\\\\Documents\\\\PlatformIO\\\\Projects\\\\ESP32_LEVEL2\"; & \"$env:USERPROFILE\\\\.platformio\\\\penv\\\\Scripts\\\\pio.exe\" run 2>&1 | Select-Object -Last 80)",
+      "PowerShell(cd \"c:\\\\Users\\\\thait\\\\OneDrive\\\\Documents\\\\PlatformIO\\\\Projects\\\\ESP32_LEVEL2\"; & \"$env:USERPROFILE\\\\.platformio\\\\penv\\\\Scripts\\\\pio.exe\" run 2>&1 | Select-Object -Last 15)"
+    ]
+  }
+}

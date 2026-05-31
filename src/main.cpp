@@ -14,9 +14,10 @@
 #include "DevWebServer.h"
 #include "DevStateStore.h"
 #include "DevStateMachine.h"
+#include "DevNTP.h"
+#include "DevRelayScheduler.h"
 
 // ── Hardware ──────────────────────────────────────────────────
-// SW1=MODE/ENTER  SW2=DOWN  SW3=UP
 DevSwitch sw1(34, false);   // MODE / ENTER
 DevSwitch sw2(35, false);   // DOWN
 DevSwitch sw3(32, false);   // UP
@@ -35,17 +36,19 @@ DevWebServer webServer(&relay1, &relay2, &relay3, &weather, &ds18, &xymd);
 DevStateStore stateStore;
 DevStateMachine sm(sw1, sw2, sw3, &relay1, &relay2, &relay3);
 
+DevNTP ntp;                                                    // UTC+7
+DevRelayScheduler scheduler(&relay1, &relay2, &relay3, &ntp);
+
 // ── forward declarations ───────────────────────────────────────
 static void _drawCurrentState();
 static void _onRelayChanged(int n);
 
-// ── OLED: วาดหน้าจอตาม State ปัจจุบัน ────────────────────────
+// ── OLED: วาดหน้าจอตาม State ──────────────────────────────────
 static void _drawCurrentState() {
   using S = AppState;
   switch (sm.getState()) {
 
     case S::MONITOR:
-      // หน้าจอหลัก — แสดง sensor + weather (auto-cycle ผ่าน oled.tick())
       {
         const WeatherData& w = weather.getData();
         String ip = WiFi.localIP().toString();
@@ -97,7 +100,7 @@ static void _onRelayChanged(int n) {
   _drawCurrentState();
 }
 
-// ── WiFi reset hold ใน setup (ก่อน state machine ทำงาน) ──────
+// ── WiFi reset hold ────────────────────────────────────────────
 static bool checkWifiResetHold(int holdSec = 5) {
   sw1.begin();
   if (!sw1.readRawState()) return false;
@@ -125,7 +128,6 @@ void setup() {
   oled.begin(21, 22);
   oled.showMessage("Booting...", "", "");
 
-  // โหลด + กู้คืน state
   stateStore.load();
 
   sw2.begin();
@@ -141,11 +143,9 @@ void setup() {
       ? "Some relays ON" : "All relays OFF");
   delay(1500);
 
-  // DS18B20
   oled.showMessage("DS18B20", "Initializing...", "GPIO14");
   ds18.begin();
 
-  // WiFi reset check
   bool doReset = checkWifiResetHold(5);
   wifiMgr.begin(doReset);
 
@@ -153,7 +153,17 @@ void setup() {
   oled.showIP(ip.c_str());
   delay(2000);
 
-  // XY-MD03 (reinit Serial0 → 9600)
+  // NTP sync
+  oled.showMessage("NTP", "Syncing time...", "pool.ntp.org");
+  bool ntpOk = ntp.begin(10000);
+  if (ntpOk) {
+    oled.showMessage("NTP", ntp.timeStr().c_str(), ntp.dateStr().c_str());
+  } else {
+    oled.showMessage("NTP", "Sync failed", "Retry in loop");
+  }
+  delay(1000);
+
+  // XY-MD03
   Serial.println("[XYMD] Switching Serial0 to 9600...");
   Serial.flush();
   oled.showMessage("XY-MD03", "SlaveID:2", "Serial0 9600");
@@ -174,20 +184,25 @@ void setup() {
   }
   delay(1000);
 
+  // Load schedules from NVS
+  scheduler.load();
+  scheduler.setOnRelayChange([]() { _onRelayChanged(0); });
+
   // Weather
   oled.showMessage("Weather", "Fetching...", OWM_CITY_NAME);
   weather.update();
 
-  // MQTT — relay เปลี่ยนจาก broker
+  // MQTT
   mqtt.setOnRelayChange([]() { _onRelayChanged(0); });
   oled.showMessage("MQTT", "Connecting...", MQTT_HOST);
   mqtt.begin();
 
-  // Web Server — relay เปลี่ยนจาก dashboard
+  // Web Server — ส่ง NTP + Scheduler เข้าไปด้วย
   webServer.setOnRelayChange([]() { _onRelayChanged(0); });
+  webServer.setNTP(&ntp);
+  webServer.setScheduler(&scheduler);
   webServer.begin();
 
-  // แสดงหน้าจอ MONITOR
   _drawCurrentState();
   Serial.println("Ready — SW1=Menu  SW2=Down  SW3=Up  Hold SW1=Back");
 }
@@ -198,7 +213,6 @@ void loop() {
   sw2.update();
   sw3.update();
 
-  // ── State Machine ──────────────────────────────────────────
   DevStateMachine::Result r = sm.update();
 
   switch (r.event) {
@@ -209,15 +223,13 @@ void loop() {
     case DevStateMachine::Event::WIFI_RESET:
       oled.showMessage("WiFi Reset", "Clearing...", "Restarting...");
       delay(1000);
-      WiFi.disconnect(true, true);   // ล้าง credentials
+      WiFi.disconnect(true, true);
       delay(500);
       ESP.restart();
       break;
 
     case DevStateMachine::Event::OLED_SPEED_TOGGLE:
-      // เปลี่ยน PAGE_INTERVAL ตาม isOledFast()
-      // ใช้ค่าจาก sm โดยตรงใน tick() ผ่าน getter
-      _drawCurrentState();  // redraw settings เพื่อแสดงค่าใหม่
+      _drawCurrentState();
       break;
 
     case DevStateMachine::Event::REDRAW:
@@ -229,19 +241,19 @@ void loop() {
       break;
   }
 
-  // ── Sensors update ─────────────────────────────────────────
-  if (ds18.update() && sm.getState() == AppState::MONITOR) {
-    _drawCurrentState();
-  }
-  if (xymd.update() && sm.getState() == AppState::MONITOR) {
-    _drawCurrentState();
-  }
+  // ── Sensors ────────────────────────────────────────────────
+  if (ds18.update() && sm.getState() == AppState::MONITOR) _drawCurrentState();
+  if (xymd.update() && sm.getState() == AppState::MONITOR) _drawCurrentState();
   if (weather.isDue()) {
     weather.update();
     if (sm.getState() == AppState::MONITOR) _drawCurrentState();
   }
 
-  // ── OLED auto-cycle (เฉพาะ MONITOR state) ─────────────────
+  // ── NTP + Scheduler ────────────────────────────────────────
+  ntp.loop();
+  scheduler.loop();
+
+  // ── OLED auto-cycle ────────────────────────────────────────
   if (sm.getState() == AppState::MONITOR) {
     oled.tick(sm.isOledFast() ? 2000UL : 5000UL);
   }
