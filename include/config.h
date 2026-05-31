@@ -1,6 +1,12 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
+// ===== Telegram Bot =====
+// สร้าง bot ผ่าน @BotFather → /newbot  แล้วเอา token มาใส่
+// หา chat_id: ส่งข้อความหา bot แล้วเปิด https://api.telegram.org/bot<TOKEN>/getUpdates
+#define TELEGRAM_BOT_TOKEN  "8581842116:AAFa1WEVz9Gaekkgnz8BStuJ0sZiCUujLo4"
+#define TELEGRAM_CHAT_ID    "7745779456"
+
 // ===== OpenWeatherMap =====
 // สมัครฟรีที่ https://openweathermap.org/api
 // แผน Free รองรับ Current Weather + Air Pollution API

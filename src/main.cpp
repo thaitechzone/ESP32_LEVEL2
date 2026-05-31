@@ -16,6 +16,7 @@
 #include "DevStateMachine.h"
 #include "DevNTP.h"
 #include "DevRelayScheduler.h"
+#include "DevTelegram.h"
 
 // ── Hardware ──────────────────────────────────────────────────
 DevSwitch sw1(34, false);   // MODE / ENTER
@@ -38,10 +39,11 @@ DevStateMachine sm(sw1, sw2, sw3, &relay1, &relay2, &relay3);
 
 DevNTP ntp;                                                    // UTC+7
 DevRelayScheduler scheduler(&relay1, &relay2, &relay3, &ntp);
+DevTelegram telegram(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID);
 
 // ── forward declarations ───────────────────────────────────────
 static void _drawCurrentState();
-static void _onRelayChanged(int n);
+static void _onRelayChanged(int n, const char* source = "Manual");
 
 // ── OLED: วาดหน้าจอตาม State ──────────────────────────────────
 static void _drawCurrentState() {
@@ -89,13 +91,19 @@ static void _drawCurrentState() {
 }
 
 // ── Relay เปลี่ยนสถานะ (ทุก source) ──────────────────────────
-static void _onRelayChanged(int n) {
+static void _onRelayChanged(int n, const char* source) {
   stateStore.saveAllRelays(relay1.getState(), relay2.getState(), relay3.getState());
-  if (n > 0) mqtt.publishRelayState(n);
-  else {
-    mqtt.publishRelayState(1);
-    mqtt.publishRelayState(2);
-    mqtt.publishRelayState(3);
+
+  DevRelay* relays[3] = {&relay1, &relay2, &relay3};
+
+  if (n > 0) {
+    mqtt.publishRelayState(n);
+    telegram.alertRelay(n, relays[n-1]->getState(), source);
+  } else {
+    for (int i = 1; i <= 3; i++) {
+      mqtt.publishRelayState(i);
+      telegram.alertRelay(i, relays[i-1]->getState(), source);
+    }
   }
   _drawCurrentState();
 }
@@ -186,22 +194,39 @@ void setup() {
 
   // Load schedules from NVS
   scheduler.load();
-  scheduler.setOnRelayChange([]() { _onRelayChanged(0); });
+  scheduler.setOnRelayChange([]() { _onRelayChanged(0, "Schedule"); });
 
   // Weather
   oled.showMessage("Weather", "Fetching...", OWM_CITY_NAME);
   weather.update();
 
   // MQTT
-  mqtt.setOnRelayChange([]() { _onRelayChanged(0); });
+  mqtt.setOnRelayChange([]() { _onRelayChanged(0, "MQTT"); });
   oled.showMessage("MQTT", "Connecting...", MQTT_HOST);
   mqtt.begin();
 
-  // Web Server — ส่ง NTP + Scheduler เข้าไปด้วย
-  webServer.setOnRelayChange([]() { _onRelayChanged(0); });
+  // Web Server
+  webServer.setOnRelayChange([]() { _onRelayChanged(0, "Web"); });
   webServer.setNTP(&ntp);
   webServer.setScheduler(&scheduler);
+  webServer.setTelegram(&telegram);
   webServer.begin();
+
+  // Telegram — setup
+  telegram.setRelays(&relay1, &relay2, &relay3);
+  telegram.setWeather(&weather);
+  telegram.setDS18(&ds18);
+  telegram.setXYMD(&xymd);
+  telegram.setNTP(&ntp);
+  // ปรับ threshold ตามต้องการ
+  telegram.setTempHighLimit(40.0f);
+  telegram.setTempLowLimit(10.0f);
+  telegram.setRainLimit(70);
+  telegram.setAqiLevel(4);
+
+  // Boot alert — ส่งหลัง setup ทุกอย่างเสร็จ
+  oled.showMessage("Telegram", "Sending boot...", "");
+  telegram.sendBootAlert(stateStore.bootCount());
 
   _drawCurrentState();
   Serial.println("Ready — SW1=Menu  SW2=Down  SW3=Up  Hold SW1=Back");
@@ -217,7 +242,7 @@ void loop() {
 
   switch (r.event) {
     case DevStateMachine::Event::RELAY_CHANGED:
-      _onRelayChanged(r.relayNum);
+      _onRelayChanged(r.relayNum, "Manual");
       break;
 
     case DevStateMachine::Event::WIFI_RESET:
@@ -247,11 +272,16 @@ void loop() {
   if (weather.isDue()) {
     weather.update();
     if (sm.getState() == AppState::MONITOR) _drawCurrentState();
+    telegram.checkWeatherAlert();   // ตรวจ AQI/Rain หลัง weather อัปเดต
   }
 
   // ── NTP + Scheduler ────────────────────────────────────────
   ntp.loop();
   scheduler.loop();
+
+  // ── Telegram alerts ────────────────────────────────────────
+  telegram.checkTempAlert();  // ตรวจ DS18B20 ทุก loop (มี cooldown 5 นาที)
+  telegram.loop();            // drain send queue
 
   // ── OLED auto-cycle ────────────────────────────────────────
   if (sm.getState() == AppState::MONITOR) {

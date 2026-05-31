@@ -279,6 +279,99 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawhtml(
   </div>
 </div>
 
+<!-- ═══ TELEGRAM SETTINGS (full width) ═══ -->
+<div class="card p-5 mt-5" id="tg-panel">
+  <div class="card-header">
+    ✈️ Telegram Alerts
+    <span class="ml-2" id="tg-status-badge"></span>
+    <span class="ml-auto flex gap-2">
+      <button onclick="tgSendTest()"
+        class="normal-case font-semibold text-xs bg-sky-100 text-sky-700 hover:bg-sky-200
+               px-3 py-1 rounded-full transition-colors">
+        🔔 ทดสอบส่ง
+      </button>
+      <button onclick="tgSendStatus()"
+        class="normal-case font-semibold text-xs bg-violet-100 text-violet-700 hover:bg-violet-200
+               px-3 py-1 rounded-full transition-colors">
+        📊 รายงานสถานะ
+      </button>
+    </span>
+  </div>
+
+  <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+
+    <!-- ── Alert Toggles ── -->
+    <div>
+      <p class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-3">
+        🔔 ประเภทการแจ้งเตือน
+      </p>
+      <div class="space-y-2" id="tg-alert-toggles">
+        <!-- injected by JS -->
+      </div>
+    </div>
+
+    <!-- ── Threshold Settings ── -->
+    <div>
+      <p class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-3">
+        ⚙️ ค่า Threshold
+      </p>
+      <div class="space-y-3">
+        <div class="flex items-center justify-between gap-3">
+          <label class="text-sm text-slate-600 flex-1">🔥 อุณหภูมิสูง (°C)</label>
+          <input id="tg-temp-high" type="number" step="0.5" min="20" max="80"
+            class="time-input w-20" oninput="tgMarkDirty()">
+        </div>
+        <div class="flex items-center justify-between gap-3">
+          <label class="text-sm text-slate-600 flex-1">🧊 อุณหภูมิต่ำ (°C)</label>
+          <input id="tg-temp-low" type="number" step="0.5" min="-20" max="30"
+            class="time-input w-20" oninput="tgMarkDirty()">
+        </div>
+        <div class="flex items-center justify-between gap-3">
+          <label class="text-sm text-slate-600 flex-1">🌧 โอกาสฝน (%)</label>
+          <input id="tg-rain-limit" type="number" step="5" min="10" max="100"
+            class="time-input w-20" oninput="tgMarkDirty()">
+        </div>
+        <div class="flex items-center justify-between gap-3">
+          <label class="text-sm text-slate-600 flex-1">🌫 AQI Level (1-5)</label>
+          <input id="tg-aqi-level" type="number" step="1" min="1" max="5"
+            class="time-input w-20" oninput="tgMarkDirty()">
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Status / Save ── -->
+    <div class="flex flex-col justify-between gap-4">
+      <div>
+        <p class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-3">
+          📡 สถานะ
+        </p>
+        <div class="space-y-0.5">
+          <div class="info-row">
+            <span class="info-label">Queue รอส่ง</span>
+            <span class="info-value text-violet-600" id="tg-queue">0 ข้อ</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Alert Mask</span>
+            <span class="info-value font-mono text-xs text-slate-500" id="tg-mask">--</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Cooldown</span>
+            <span class="info-value text-slate-500">5 นาที / alert type</span>
+          </div>
+        </div>
+      </div>
+      <div class="space-y-2">
+        <button id="tg-save-btn" onclick="tgSaveConfig()"
+          class="save-btn w-full">
+          💾 บันทึกการตั้งค่า
+        </button>
+        <div class="text-xs text-center h-4" id="tg-save-msg"></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
 <!-- ═══ MQTT PANEL (full width) ═══ -->
 <div class="card p-5 mt-5">
   <div class="card-header">
@@ -418,6 +511,9 @@ function render(d) {
       rc.appendChild(row);
     });
   }
+
+  // ── Telegram ──
+  if (d.tg) updateTgPanel(d.tg);
 
   // ── Schedule ──────────────────────────────────────────────────
   // กฎ: rebuild DOM เฉพาะครั้งแรก หรือเมื่อ server confirm การ save กลับมา
@@ -719,6 +815,126 @@ function saveSchedule(i) {
       showSchedMsg(i, '⚠️ ไม่ได้รับการยืนยัน', 4000);
     }
   }, 5000);
+}
+
+// ─── Telegram Settings ───────────────────────────────────────────
+const TG_ALERT_DEFS = [
+  { key: 'alRelayOn',  label: '⚡ Relay เปิด',         desc: 'แจ้งทุกครั้งที่ relay เปิด' },
+  { key: 'alRelayOff', label: '🔌 Relay ปิด',          desc: 'แจ้งทุกครั้งที่ relay ปิด' },
+  { key: 'alTempHigh', label: '🔥 อุณหภูมิสูง',        desc: 'DS18B20 เกิน Threshold' },
+  { key: 'alTempLow',  label: '🧊 อุณหภูมิต่ำ',        desc: 'DS18B20 ต่ำกว่า Threshold' },
+  { key: 'alAqi',      label: '🌫 AQI แย่',            desc: 'AQI ≥ ระดับที่กำหนด' },
+  { key: 'alRain',     label: '🌧 โอกาสฝนสูง',         desc: 'โอกาสฝน ≥ Threshold' },
+  { key: 'alBoot',     label: '🚀 เปิดเครื่อง',         desc: 'แจ้งทุกครั้งที่ ESP32 restart' },
+  { key: 'alSchedOn',  label: '⏰ Schedule เปิด Relay', desc: 'Relay เปิดตามตาราง' },
+  { key: 'alSchedOff', label: '⏰ Schedule ปิด Relay', desc: 'Relay ปิดตามตาราง' },
+];
+
+let tgConfig = null;    // cache จาก server
+let tgDirty  = false;
+let tgSaveTimer = null;
+
+// init toggles DOM ครั้งเดียว
+function buildTgToggles() {
+  const cont = document.getElementById('tg-alert-toggles');
+  if (!cont || cont.children.length > 0) return;
+  TG_ALERT_DEFS.forEach(def => {
+    const row = document.createElement('div');
+    row.className = 'flex items-center justify-between gap-2 py-1.5 border-b border-slate-100 last:border-0';
+    row.innerHTML = `
+      <div class="flex-1 min-w-0">
+        <div class="text-sm font-medium text-slate-700 leading-tight">${def.label}</div>
+        <div class="text-xs text-slate-400">${def.desc}</div>
+      </div>
+      <label class="toggle-sched flex-shrink-0">
+        <input type="checkbox" id="tg-al-${def.key}" checked onchange="tgMarkDirty()">
+        <span class="slider"></span>
+      </label>`;
+    cont.appendChild(row);
+  });
+}
+
+function updateTgPanel(tg) {
+  if (!tg || !tg.enabled) return;
+  tgConfig = tg;
+
+  buildTgToggles();  // no-op ถ้า build แล้ว
+
+  // status badge
+  const badge = document.getElementById('tg-status-badge');
+  if (badge) badge.innerHTML =
+    '<span class="text-xs font-semibold bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full normal-case">Active</span>';
+
+  // queue / mask
+  const q = document.getElementById('tg-queue');
+  if (q) q.textContent = tg.queueCount + ' ข้อ';
+  const m = document.getElementById('tg-mask');
+  if (m) m.textContent = '0x' + tg.alertMask.toString(16).toUpperCase().padStart(4,'0');
+
+  // threshold inputs — อัปเดตเฉพาะถ้าไม่ dirty และไม่ focus
+  if (!tgDirty) {
+    const setVal = (id, v) => {
+      const el = document.getElementById(id);
+      if (el && document.activeElement !== el) el.value = v;
+    };
+    setVal('tg-temp-high',  tg.tempHigh);
+    setVal('tg-temp-low',   tg.tempLow);
+    setVal('tg-rain-limit', tg.rainLimit);
+    setVal('tg-aqi-level',  tg.aqiLevel);
+
+    // alert toggles
+    TG_ALERT_DEFS.forEach(def => {
+      const el = document.getElementById('tg-al-' + def.key);
+      if (el) el.checked = tg[def.key] !== false;
+    });
+  }
+}
+
+function tgMarkDirty() {
+  tgDirty = true;
+  const btn = document.getElementById('tg-save-btn');
+  if (btn) { btn.textContent = '💾 บันทึก *'; btn.style.opacity = '1'; }
+}
+
+function tgSaveConfig() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+  const payload = { cmd: 'tg_config' };
+  const num = (id, fb) => { const v = parseFloat(document.getElementById(id)?.value); return isNaN(v) ? fb : v; };
+  payload.tempHigh  = num('tg-temp-high', 40);
+  payload.tempLow   = num('tg-temp-low', 10);
+  payload.rainLimit = parseInt(document.getElementById('tg-rain-limit')?.value) || 70;
+  payload.aqiLevel  = parseInt(document.getElementById('tg-aqi-level')?.value)  || 4;
+
+  TG_ALERT_DEFS.forEach(def => {
+    const el = document.getElementById('tg-al-' + def.key);
+    payload[def.key] = el ? el.checked : true;
+  });
+
+  ws.send(JSON.stringify(payload));
+
+  tgDirty = false;
+  const btn = document.getElementById('tg-save-btn');
+  if (btn) { btn.textContent = '⏳ กำลังบันทึก...'; btn.style.opacity = '0.6'; }
+
+  clearTimeout(tgSaveTimer);
+  tgSaveTimer = setTimeout(() => {
+    const btn2 = document.getElementById('tg-save-btn');
+    if (btn2) { btn2.textContent = '💾 บันทึกการตั้งค่า'; btn2.style.opacity = '1'; }
+    const msg = document.getElementById('tg-save-msg');
+    if (msg) { msg.textContent = '✅ บันทึกแล้ว'; msg.style.color='#16a34a';
+      setTimeout(()=>{ msg.textContent=''; }, 3000); }
+  }, 1500);
+}
+
+function tgSendTest() {
+  if (ws && ws.readyState === WebSocket.OPEN)
+    ws.send(JSON.stringify({ cmd: 'tg_test' }));
+}
+
+function tgSendStatus() {
+  if (ws && ws.readyState === WebSocket.OPEN)
+    ws.send(JSON.stringify({ cmd: 'tg_status' }));
 }
 
 // ─── Actions ─────────────────────────────────────────────────────

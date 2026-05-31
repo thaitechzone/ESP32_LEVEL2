@@ -13,6 +13,7 @@
 #include "DevXYMDSensor.h"
 #include "DevNTP.h"
 #include "DevRelayScheduler.h"
+#include "DevTelegram.h"
 
 class DevWebServer {
 private:
@@ -25,6 +26,7 @@ private:
   DevXYMDSensor*      xymd;
   DevNTP*             ntp       = nullptr;
   DevRelayScheduler*  scheduler = nullptr;
+  DevTelegram*        telegram  = nullptr;
 
   unsigned long lastBroadcast = 0;
   static const unsigned long BROADCAST_INTERVAL = 2000;
@@ -59,6 +61,30 @@ private:
         o["offMinute"] = e.offMinute;
         o["dayMask"]   = e.dayMask;
       }
+    }
+
+    // Telegram config
+    if (telegram) {
+      doc["tg"]["enabled"]    = true;
+      doc["tg"]["queueCount"] = telegram->getQueueCount();
+      doc["tg"]["tempHigh"]   = telegram->getTempHighLimit();
+      doc["tg"]["tempLow"]    = telegram->getTempLowLimit();
+      doc["tg"]["rainLimit"]  = telegram->getRainLimit();
+      doc["tg"]["aqiLevel"]   = telegram->getAqiLevel();
+      uint16_t mask           = telegram->getEnabledAlerts();
+      doc["tg"]["alertMask"]  = mask;
+      // per-type enable flags
+      doc["tg"]["alRelayOn"]    = telegram->isAlertEnabled(TgAlert::RELAY_ON);
+      doc["tg"]["alRelayOff"]   = telegram->isAlertEnabled(TgAlert::RELAY_OFF);
+      doc["tg"]["alTempHigh"]   = telegram->isAlertEnabled(TgAlert::TEMP_HIGH);
+      doc["tg"]["alTempLow"]    = telegram->isAlertEnabled(TgAlert::TEMP_LOW);
+      doc["tg"]["alAqi"]        = telegram->isAlertEnabled(TgAlert::AQI_POOR);
+      doc["tg"]["alRain"]       = telegram->isAlertEnabled(TgAlert::RAIN_HIGH);
+      doc["tg"]["alBoot"]       = telegram->isAlertEnabled(TgAlert::BOOT);
+      doc["tg"]["alSchedOn"]    = telegram->isAlertEnabled(TgAlert::SCHEDULE_ON);
+      doc["tg"]["alSchedOff"]   = telegram->isAlertEnabled(TgAlert::SCHEDULE_OFF);
+    } else {
+      doc["tg"]["enabled"] = false;
     }
 
     // weather
@@ -168,7 +194,6 @@ private:
       }
 
     } else if (cmd == "relay_set" ) {
-      // {"cmd":"relay_set","n":1,"state":true}
       int  n  = doc["n"].as<int>();
       bool st = doc["state"].as<bool>();
       if (n >= 1 && n <= 3) {
@@ -176,6 +201,45 @@ private:
         if (onRelayChange) onRelayChange();
         ws.textAll(buildJson());
       }
+
+    } else if (cmd == "tg_config" && telegram) {
+      // {"cmd":"tg_config","tempHigh":40,"tempLow":10,"rainLimit":70,"aqiLevel":4,
+      //  "alRelayOn":true,...}
+      if (doc["tempHigh"].is<float>())
+        telegram->setTempHighLimit(doc["tempHigh"].as<float>());
+      if (doc["tempLow"].is<float>())
+        telegram->setTempLowLimit(doc["tempLow"].as<float>());
+      if (doc["rainLimit"].is<int>())
+        telegram->setRainLimit(doc["rainLimit"].as<int>());
+      if (doc["aqiLevel"].is<int>())
+        telegram->setAqiLevel(doc["aqiLevel"].as<int>());
+
+      // rebuild enabledAlerts bitmask จาก per-flag fields
+      uint16_t mask = 0;
+      auto addFlag = [&](const char* key, uint16_t bit) {
+        if (!doc[key].is<bool>() || doc[key].as<bool>()) mask |= bit;
+      };
+      addFlag("alRelayOn",  TgAlert::RELAY_ON);
+      addFlag("alRelayOff", TgAlert::RELAY_OFF);
+      addFlag("alTempHigh", TgAlert::TEMP_HIGH);
+      addFlag("alTempLow",  TgAlert::TEMP_LOW);
+      addFlag("alAqi",      TgAlert::AQI_POOR);
+      addFlag("alRain",     TgAlert::RAIN_HIGH);
+      addFlag("alBoot",     TgAlert::BOOT);
+      addFlag("alSchedOn",  TgAlert::SCHEDULE_ON);
+      addFlag("alSchedOff", TgAlert::SCHEDULE_OFF);
+      telegram->setEnabledAlerts(mask);
+
+      Serial.printf("[WS] TG config updated mask=0x%04X\n", mask);
+      ws.textAll(buildJson());
+
+    } else if (cmd == "tg_test" && telegram) {
+      telegram->sendTestMessage();
+      ws.textAll(buildJson());
+
+    } else if (cmd == "tg_status" && telegram) {
+      telegram->sendStatusReport();
+      ws.textAll(buildJson());
     }
   }
 
@@ -190,6 +254,7 @@ public:
   void setMqttConnected(bool v)              { mqttConnected = v; }
   void setNTP(DevNTP* n)                     { ntp = n; }
   void setScheduler(DevRelayScheduler* s)    { scheduler = s; }
+  void setTelegram(DevTelegram* t)           { telegram = t; }
 
   void begin() {
     ws.onEvent([this](AsyncWebSocket* s, AsyncWebSocketClient* c,
