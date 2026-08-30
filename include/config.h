@@ -14,9 +14,13 @@
 // อัปเดตทุกกี่วินาที (Free plan limit: 60 calls/min, แนะนำ 300s+)
 #define WEATHER_UPDATE_SEC  5000
 
-// ===== HiveMQ (Free public broker) =====
-#define MQTT_HOST     "broker.hivemq.com"
-#define MQTT_PORT     1883
+
+
+// ===== MQTT Broker =====
+#define MQTT_HOST       "192.168.1.10"
+#define MQTT_PORT       1883
+#define MQTT_USERNAME   "nattaphol"
+#define MQTT_PASSWORD   "pamkmitnb"
 // Client ID ควร unique — ใส่ mac address ท้าย 6 ตัวก็ได้
 #define MQTT_CLIENT_ID  "esp32-level2"
 

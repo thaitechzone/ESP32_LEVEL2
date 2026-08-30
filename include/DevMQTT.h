@@ -107,7 +107,7 @@ private:
     String lwt = _top("status");
     bool ok = client.connect(
       MQTT_CLIENT_ID,
-      nullptr, nullptr,           // no auth on public broker
+      MQTT_USERNAME, MQTT_PASSWORD,
       lwt.c_str(), 1, true,       // LWT: QoS1, retain
       "offline"
     );
